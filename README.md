@@ -1,251 +1,352 @@
-# ThermoGhost
+<div align="center">
 
-ESP32 room temperature sensor exposed through a secure Tollan tunnel.
+<img src="docs/hero.jpg" alt="ThermoGhost — ESP32 temperature sensor in a 3D-printed case, dashboard on a phone" width="680">
 
-```
-poller ──HTTPS──▶ tollan relay ──(mTLS WSS, tollan.v1)──▶ ESP32
-  "what's the temp in the living room?"              serves JSON reading
-```
+# 🌡️ ThermoGhost
 
-The board opens an outbound mutual-TLS WebSocket to the relay and holds it; no
-inbound ports, no port-forwarding, works behind NAT/CGNAT.
+**Your own ESP32 temperature sensor, readable from anywhere on the planet — no port forwarding, no VPN, no cloud database.**
 
-## Parts
+<!-- TODO: swap the channel link for the video URL once the real build is published -->
+[![Watch the build](https://img.shields.io/badge/YouTube-▶%20Watch%20the%20build-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://www.youtube.com/@angeldev0)
+[![License](https://img.shields.io/badge/License-MIT-8A2BE2?style=for-the-badge)](LICENSE)
+[![ESP32](https://img.shields.io/badge/hardware-ESP32%20%2F%20S2%20%2F%20C3-FF6744?style=for-the-badge&logo=espressif&logoColor=white)](https://espressif.com)
+[![Tollan](https://img.shields.io/badge/remote%20access-Tollan-4F46C5?style=for-the-badge)](https://tollan.ie)
+[![Stars](https://img.shields.io/github/stars/4ngel2769/ThermoGhost?style=for-the-badge&color=gold&logo=github)](https://github.com/4ngel2769/ThermoGhost/stargazers)
 
-- `src/main.cpp` — firmware: TollanAgent handler mode + DHT22/DS18B20 reader.
-  Set `ROOM_ID` per sensor (living, kitchen, office, ...). The room id is
-  echoed in every JSON response.
-- `src/web_page.h` — tiny status page (`GET /`, polls `GET /api`).
-- `src/secrets.h.example` / `src/tollan_config.h.example` — copy to
-  `src/secrets.h` / `src/tollan_config.h` (both gitignored, never commit).
-- `lib/` — **the TollanAgent library is not shipped here.** It is proprietary
-  ("licensed for use with the Tollan service only") and ships inside your own
-  ESP32 device bundle. Unzip it into `lib/` — see [`lib/README.md`](lib/README.md).
-- `LICENSE` — MIT for this repo's own code. It does not cover TollanAgent.
+</div>
 
-## One-time setup
+---
 
-1. **Tollan account/org** — sign up in the Tollan console. The free tier
-   (1 device, 2 routes, 5 GB) is enough for this project.
-2. **Register the device** — name e.g. `living-sensor`, and pick the **ESP32**
-   architecture. Architecture is cosmetic for the ESP32 (you take certs, not
-   a binary).
-3. **Build + download the bundle** (link is single-use, short expiry).
-   - **Current bundles use enrollment**, not a shipped private key: the board
-     generates its own key on first boot and enrols with a one-time token.
-     The bundle's `tollan_config.h` carries
-     `TOLLAN_ENROLL_URL` / `TOLLAN_ENROLL_TOKEN` / `TOLLAN_ENROLL_CA`.
-   - **Copy the bundle's `tollan_config.h` whole** into `src/`. It also
-     carries `TOLLAN_RENEW_URL`, without which your board stops working in
-     90 days (see [Certificate renewal](#certificate-renewal)), and
-     `TOLLAN_DEVICE_ID` / `TOLLAN_TARGETS_URL` for the health check-in.
-   - That file holds a **one-time enrollment token** — a secret until the
-     board has enrolled. It is gitignored; keep it off shared drives.
-   - Older bundles shipped `DEVICE_CERT` / `DEVICE_KEY` instead. The sketch
-     detects which format it has and wires the right one, so it builds
-     against both.
-   - Copy `src/secrets.h.example` → `src/secrets.h` with your WiFi creds.
-4. **Install the TollanAgent library** — it is inside the bundle you just
-   downloaded. Copy `TollanAgent/` into `lib/` so this repo has
-   `lib/TollanAgent/`. See [`lib/README.md`](lib/README.md) — it ships
-   **precompiled, one archive per chip**, so `platformio.ini` has to point the
-   linker at the right one (this repo's already does).
-5. **Add a route** on the device. Pick the exposure mode deliberately, it
-   decides what the relay can see — see [Route modes](#route-modes-and-what-the-relay-can-see).
-   - Internal target: any placeholder (handler mode — the board answers
-     directly).
-6. **Access rules** (recommended): IP allowlist and/or basic auth — both
-   are enforced at the edge in terminate mode.
-7. **Build + flash** (pick your board env):
-   ```bash
-   pio run -e esp32s2mini -t upload   # ESP32-S2 Mini (LOLIN S2 Mini)
-   pio run -e esp32dev -t upload      # classic ESP32 (WROOM-32 / DevKitC)
-   pio run -e esp32c3 -t upload       # ESP32-C3 (SuperMini / DevKitM-1)
-   pio device monitor -b 115200
-   ```
-   Watch for `tollan state -> connected`. At boot the sketch also prints
-   which credential format it found and whether renewal and the health
-   check-in are live.
-8. **Test**: `curl https://<your-route>/api` →
-   `{"room":"living","tempC":22.5,"humidity":45.2,"tsMs":...}`
+A €10 temperature sensor on your bedside table. The board dials **out** to a
+relay, holds an encrypted tunnel open, and serves a tiny dashboard plus a JSON
+API. Open the URL from a phone on mobile data and the reading is there.
 
-## Wiring
+The board is the whole server. There is no database, no dashboard service, no
+monthly bill and no cloud account holding your data.
 
-DS18B20 TO-92 (3-pin module) on **GPIO 13** — the default build:
+## How it works
 
-```
-   ESP32                     DS18B20 module
-  ┌────────┐                ┌──────────────┐
-  │  3V3   ├────────────────┤ VCC  (red)   │
-  │  GND   ├────────────────┤ GND  (black) │
-  │  IO13  ├────────────────┤ DQ   (yellow)│
-  └────────┘                └──────────────┘
+```mermaid
+flowchart LR
+  P["Phone / laptop<br/>anywhere in the world"] -->|"HTTPS"| R["Tollan relay<br/>routes by SNI"]
+  R -->|"mTLS WebSocket · tollan.v1<br/>outbound only"| E["ESP32<br/>DS18B20 + pixel dashboard"]
+  E -->|"JSON reading"| P
 ```
 
-| DS18B20 | ESP32 | Note |
+The board opens the tunnel **itself** and keeps it open, so:
+
+- **No inbound ports.** Your router never sees a forwarded port.
+- **No static IP.** Works behind NAT *and* CGNAT.
+- **Per-device identity.** Every board has its own mTLS certificate.
+
+### Why not just port-forward it?
+
+|  | Port forwarding | VPN (Tailscale / WireGuard) | **ThermoGhost** |
+|---|---|---|---|
+| Router changes | Yes — forward a port | No | **No** |
+| Public IP needed | Yes | No | **No** |
+| Works behind CGNAT | No | Yes | **Yes** |
+| Software needed by the visitor | Nothing | VPN client | **Nothing — it's a URL** |
+| Public HTTPS URL | Possible | No (internal DNS) | **Yes** |
+| Per-device identity | No — one open port | Yes | **Yes — one cert per board** |
+
+---
+
+## 🚀 Quick start
+
+```bash
+# 1. get the code
+git clone https://github.com/4ngel2769/ThermoGhost.git
+cd ThermoGhost
+
+# 2. add the TollanAgent library (it is NOT in this repo — it is proprietary
+#    and ships inside your own device bundle; see lib/README.md)
+#    unzip your bundle, then:  cp -r <bundle>/TollanAgent lib/
+
+# 3. credentials
+cp src/secrets.h.example src/secrets.h      # edit: WIFI_SSID / WIFI_PASS
+cp <your-bundle>/tollan_config.h src/        # paste-ready — keep it secret
+
+# 4. build + flash
+pio run -e esp32dev -t upload                # or -e esp32s2mini / -e esp32c3
+pio device monitor -b 115200
+```
+
+Watch the serial console for:
+
+```
+wifi ok, ip=192.168.1.42
+tollan: enrollment bundle — the board makes its own key on first boot
+tollan: cert renewal enabled
+tollan state -> connected
+```
+
+Then open your route in a browser.
+
+> **New to Tollan?** You need a free account and a device bundle.
+> [tollan.ie](https://tollan.ie) → register a device with the **ESP32**
+> architecture → **Build bundle** → download it. The bundle contains your
+> `tollan_config.h`, the relay CA and the TollanAgent library. The free tier
+> (1 device, 2 routes, 5 GB) is plenty for this project.
+
+---
+
+## 🔌 Hardware
+
+| Part | Why | ~Cost |
 |---|---|---|
-| VCC | 3V3 | |
-| GND | GND | |
-| DQ | GPIO 13 | 4.7 kΩ pull-up DQ → 3V3 |
+| ESP32 DevKit / S2 Mini / C3 | The brain **and** the server | €4 – €8 |
+| DS18B20 module (`S` / `V` / `G`) | Temperature, ±0.5 °C | €2 – €4 |
+| 3 × female-to-female Dupont | VCC / GND / signal | €1 |
+| Micro-USB data cable | Flashing + power | €2 |
+| 3D-printed case | Snug home for the board | ~€1 of filament |
 
-**On the 4.7 kΩ pull-up:** it is required on a bare TO-92 sensor. Most
-3-pin breakout modules (the `S`/`V`/`G` ones) already have it on board — check
-before adding a second one. A module without a pull-up reports
-`{"error":"sensor_read_failed"}` (DallasTemperature's -127 disconnected value
-is treated as a read error, not a reading).
+**Total: roughly €10 and an afternoon.**
 
-TO-92 pinout (flat side toward you, pins down): 1 = GND, 2 = DQ (data),
-3 = VDD (3V3).
+### Wiring
 
-## Sensor
+Three wires, on **GPIO 12**:
 
-Compile-time switch in `src/main.cpp` (`#define SENSOR_TYPE ...`). Default
-build uses **DS18B20 (TO-92)** on **GPIO 13**.
+```
+   ESP32 DevKit                    DS18B20 module
+  ┌────────────┐                 ┌────────────────┐
+  │  3V3       ├─────────────────┤ VCC   (red)    │
+  │  GND       ├─────────────────┤ GND   (black)  │
+  │  IO12 (D2) ├─────────────────┤ S/DQ (yellow)  │
+  └────────────┘                 └────────────────┘
+```
 
-> **Why GPIO 13 and not 12?** GPIO 12 is a strapping pin (MTDI). It selects
-> the flash voltage at boot: high = 1.8 V, low = 3.3 V. A DS18B20's 4.7 kΩ
-> pull-up to 3V3 holds the line high at reset, so the chip may fail to boot
-> or be unstable on a 3.3 V flash module. GPIO 13 has no such job.
-> If you are following a build that used GPIO 12 and the board won't boot,
-> move the data wire to **IO13**:
-> `build_flags = -DSENSOR_PIN=12` in `platformio.ini`, or edit the `#define`.
+| DS18B20 module | ESP32 |
+|---|---|
+| `VCC` | `3V3` — **not** 5V |
+| `GND` | `GND` |
+| `S` (signal) | `GPIO 12` |
 
-| `SENSOR_TYPE` | Wiring | Notes |
-|---|---|---|
-| `SENSOR_DS18B20` (default) | DQ → GPIO 13, VCC 3V3, GND, **4.7kΩ pull-up DQ→3V3** | TO-92 air temp or waterproof probe; temp only |
-| `SENSOR_DHT22` | data → GPIO 13, VCC 3V3, GND | temp + humidity |
-| `SENSOR_DHT11` | data → GPIO 13 | temp + humidity, low precision |
+> **No resistor needed.** The 4.7 kΩ pull-up that a bare TO-92 sensor needs
+> is already on the breakout module's PCB. If you use a loose TO-92 instead,
+> add a 4.7 kΩ resistor between `DQ` and `3V3` or the reading will fail with
+> `sensor_read_failed`.
 
-**Customizing the pin / room / sensor without editing source:** all three are
-`#ifndef`-guarded, so override per env in `platformio.ini`:
+> [!WARNING]
+> **GPIO 12 is a strapping pin (MTDI).** It sets the flash voltage at boot
+> (high = 1.8 V, low = 3.3 V), and the module's pull-up holds the line high
+> at reset. Most DevKit boards boot fine. If yours hangs at boot, move the
+> signal wire to **GPIO 13** and build with `-DSENSOR_PIN=13` — no source
+> change needed.
+
+### The case
+
+The build uses the **ESP32 DevKit Case** by
+[runesblog.com](https://www.runesblog.com) — pick the *"Tall lid for sensors
+and wires"* print profile (0.2 mm layer, 2 walls, 15 % infill, ~49 min).
+
+[![ESP32 DevKit Case](https://makerworld.bblmw.com/makerworld/model/US17e15d73e7ed23/design/2025-12-31_5d9e1d1c206d3.jpg?x-oss-process=image/resize,w_640/format,webp)](https://makerworld.com/en/models/2180476-esp32-devkit-case-nice-and-sturdy)
+
+[Download it on MakerWorld →](https://makerworld.com/en/models/2180476-esp32-devkit-case-nice-and-sturdy)
+
+The model is by its author and is **not** redistributed here — grab it from
+MakerWorld, where it also comes in C3 Supermini and external-antenna
+variants. Small clearance tweaks may be needed depending on your DevKit
+revision.
+
+---
+
+## 📟 The dashboard
+
+`GET /` serves a tiny pixel-art page: the temperature, the room name, your
+local IP, Wi-Fi signal strength, uptime and a link to the API. It polls
+itself every 3 seconds.
+
+The same board serves both a human page and a machine API:
+
+| Route | Returns |
+|---|---|
+| `GET /api` | JSON reading |
+| `GET /json` | alias for `/api` |
+| `GET /` | the dashboard (for browsers) |
+| `GET /favicon.ico` | `204 No Content` |
+
+```json
+{
+  "room": "my_bedroom",
+  "tempC": 21.6,
+  "tsMs": 123456,
+  "ip": "192.168.1.42",
+  "rssi": -58
+}
+```
+
+- `tempC` — degrees Celsius
+- `humidity` — only with DHT22 / DHT11
+- `tsMs` — board uptime in milliseconds (there is no RTC on the board)
+- `error` — present instead of a reading if the sensor could not be read
+- Always HTTP `200`, so a poller can parse the body and inspect `error`
+
+Both routes also work on the local network, on the board's own IP — handy
+while you are still on the bench.
+
+### More rooms
+
+Each board is its own device with its own certificate. To add a second room:
+register a second device, change `ROOM_ID`, flash, add a route. The room id
+is echoed in every response so a poller always knows which sensor answered.
+
+You can also override everything without touching the source:
 
 ```ini
 [env:esp32dev]
 board = esp32dev
-build_flags = -DSENSOR_PIN=13 -DROOM_ID='"my_bedroom"'
+build_flags =
+    -DSENSOR_PIN=13 -DROOM_ID='"my_bedroom"'
 ```
 
-Safe pins if 13 is awkward: 18, 19, 21, 22, 23, 25, 26, 27, 32, 33 (all
-broken out, non-strapping). Avoid 0, 12, 15 (strapping) and 6–11 (flash/PSRAM
-on some modules).
+---
 
-## API
+## 🔐 Security model
 
-- `GET /api` (or `/json`, or `/` without `Accept: text/html`) →
-  `{"room","tempC","humidity?","error?","tsMs","ip","rssi"}`, always HTTP 200.
-- `GET /` with a browser → status page.
-- `tsMs` is board uptime in ms (no wall clock on the board).
+Worth reading once, because "it runs on my hardware" and "nobody can see my
+data" are two different claims.
 
-## Route modes, and what the relay can see
+**What is true:**
 
-This is the one thing worth understanding before you publish a project like
-this, because the answer changes with the mode you pick.
+- The device key is generated **on the chip** and never leaves it. The bundle
+  carries a one-time enrolment token, not a private key.
+- The relay↔board hop is **mutual TLS** end-to-end, with a certificate per
+  board. Revoke a device in the console and its tunnel drops within seconds.
+- **No inbound ports**, so there is nothing to brute-force.
+- Nothing is stored: no database, no account, no history. The reading exists
+  in the browser tab you opened it in.
+- Your Wi-Fi credentials and device key never go to the relay.
 
-| | Passthrough | Terminate |
-|---|---|---|
-| Visitor's TLS ends at | your device | the relay edge |
-| Certificate | yours, on the device | managed by the platform |
-| Relay sees plaintext | never | **yes, for this route** |
-| Basic auth at the edge | no — enforce in your app | yes |
-| IP allowlist at the edge | yes (connection metadata) | yes |
+**What the relay can see:** the board speaks plain HTTP, and console
+subdomains use **terminate mode** — the relay ends the visitor's TLS
+connection and forwards the request to the board over the mTLS tunnel. So on
+that leg the relay can read the request in transit, including the reading.
+It cannot read the device key, and it stores nothing.
 
-**This board serves plain HTTP.** That means it needs **terminate** mode, and
-in terminate mode the relay *does* see your reading in cleartext between the
-visitor and the board. It is still end-to-end mTLS from the relay to the
-board, and the relay never sees your device key, your WiFi password or your
-cert — but it is not a zero-knowledge relay, and it is worth being precise
-about that.
+**If that matters to you:** put an IP allowlist or basic auth on the route —
+both are enforced at the edge — or use a **passthrough** route, where the
+relay routes by SNI without decrypting and your board terminates TLS itself.
+Passthrough is the genuinely zero-knowledge setup, and it means running your
+own certificate on the ESP32.
 
-You get a genuinely zero-knowledge relay only with **passthrough**, which
-needs the device to terminate TLS itself with its own certificate. That is a
-bigger job than this sketch.
+---
 
-## Certificate renewal
+## ⏳ Lifetime
 
-Device certificates are valid for **90 days**.
+Device certificates are valid for **90 days**. With `TOLLAN_RENEW_URL` set
+(the current bundles include it, and this sketch wires it up), the board
+renews its own certificate about 30 days before expiry and keeps the renewed
+identity in flash — no action needed, as long as the board is powered on
+sometime during those last 30 days.
 
-Current bundles ship `TOLLAN_RENEW_URL` in `tollan_config.h`, and
-TollanAgent **0.2.0+** uses it to renew the certificate on the board roughly
-30 days before expiry — the board makes a new key on the chip and keeps the
-renewed identity across reboots. The sketch in this repo sets `cfg.renewUrl`
-when the library supports it, and prints which case you got on the serial
-console at boot:
+The serial console tells you at boot which features are live:
 
 ```
+tollan: enrollment bundle — the board makes its own key on first boot
 tollan: cert renewal enabled
-tollan: library has no renewUrl (need TollanAgent 0.2.0+) — certs will NOT auto-renew
-tollan: no TOLLAN_RENEW_URL in bundle — certs will NOT auto-renew (90-day expiry)
+tollan: health check-in enabled
 ```
 
-If you see either of the last two, the board will stop connecting when the
-cert expires. Re-download your device bundle and flash the library it ships.
-
-The board must be online at some point during its last 30 days. One that sits
-off until after expiry cannot renew and needs a new bundle.
-
-## TLS/clock gotchas (first bring-up)
-
-- **TLS version:** most ESP32 cores negotiate **TLS 1.2**, and Tollan's relays
-  accept it using forward-secret elliptic-curve suites only. If the handshake
-  fails with a fatal alert — mbedTLS `-30592`, *"A fatal alert message was
-  received from our peer"* — the cause is a **wrong relay host or port**, not
-  the TLS version. Use `TOLLAN_RELAY_HOST` / `TOLLAN_RELAY_PORT` exactly as
-  the bundle gives them to you (the bundle ships port **443**, which also
-  gets through firewalls that block unusual outbound ports).
-  - Note: `sdkconfig.defaults` **cannot** enable TLS 1.3 under PlatformIO's
-    `framework = arduino` — the ESP-IDF/mbedTLS is precompiled in the core and
-    ignores sdkconfig changes. A full ESP-IDF project (Arduino as a component)
-    is the only build-side route.
-- Fresh board boots near 1970 → cert date check fails (mbedTLS `-9984`). The
-  agent SNTP-syncs automatically (`syncClock`), needs reachable NTP.
-- `TollanState::Terminal` = protocol-version mismatch; the agent stops and
-  won't reconnect. Use the library from your own bundle.
-
-## The frame-size ceiling
+## 📏 Known limit: the 1600-byte frame ceiling
 
 The TollanAgent library stages an inbound WebSocket frame in a fixed
 **1600-byte** receive buffer, inside the precompiled archive. A request that
 does not fit is dropped and the tunnel resets with `oversize request —
 dropping`.
 
-- `curl /api` sends a small request — fine.
+- `curl /api` sends a small request — always fine.
 - A browser `GET /` sends ~700–1200 B of headers plus the relay's forwarded
   headers — usually fine, but the margin is thin.
 
-`cfg.maxFrameBytes` can only *lower* this ceiling, never raise it. If the
-dashboard 404s for you in a browser while `curl /api` works, this is why —
-and the fix is upstream, in the library.
+`cfg.maxFrameBytes` can only *lower* this ceiling, never raise it; the
+buffer is inside the shipped binary. If the dashboard loads for you but
+sometimes doesn't, this is why.
 
-## Re-flashing for another room
+---
 
-Change `ROOM_ID`, register a second device in the console (each board has its
-own mTLS identity), reuse this sketch, flash. Route per sensor.
+## 🧰 Troubleshooting
 
-## Hardening notes
+<details>
+<summary><b>Build fails</b></summary>
 
-- With the current enrollment bundles the device key is generated **on the
-  chip** and never leaves it; the bundle only carries a one-time token. With
-  older bundles the private key was in the download — keep it out of git
-  either way (it is gitignored).
-- The relay↔board hop is mTLS end-to-end. In terminate mode the visitor's TLS
-  ends at the relay, so the relay sees that leg in plaintext — see
-  [Route modes](#route-modes-and-what-the-relay-can-see).
-- Put an IP allowlist or basic auth on the route. Both are enforced at the
-  edge in terminate mode, and neither is enforced in passthrough mode.
+| Symptom | Fix |
+|---|---|
+| `TollanAgent.h: No such file` | The library is not in `lib/`. Unzip your device bundle and copy `TollanAgent/` in. |
+| `undefined reference to tollan::TollanAgent::begin` | The precompiled archive isn't linked. Check `lib/TollanAgent/` exists and that the `-L` path in `platformio.ini` matches your chip. See [`lib/README.md`](lib/README.md). |
+| `'DEVICE_CERT' was not declared in this scope` | Your bundle uses enrolment but the sketch was built against an older library. Update the library (0.3.0+). |
+| `tollan: bundle uses enrollment but this library has no enroll support` | Library older than 0.3.0. Re-download your bundle. |
+</details>
 
-## Troubleshooting
+<details>
+<summary><b>Board won't connect</b></summary>
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `{"error":"sensor_read_failed"}` | No sensor on the bus | Check wiring; 3-pin modules usually have the 4.7 kΩ pull-up, bare TO-92 sensors do not |
-| Board will not boot | Sensor on GPIO 12 (strapping pin) holds the line high at reset | Move the data wire to GPIO 13 |
-| `tollan state -> connected` never appears | Wrong relay host/port, or no route | Use the bundle's `TOLLAN_RELAY_HOST` / `TOLLAN_RELAY_PORT`; check the route is enabled |
-| `undefined reference to tollan::TollanAgent::begin` | Precompiled archive not linked | Check `lib/TollanAgent/` exists and the `-L` path matches your chip — see [`lib/README.md`](lib/README.md) |
-| `'DEVICE_CERT' was not declared` | Enrollment bundle with an older library | Update the library from a fresh bundle (0.3.0+) — see [`lib/README.md`](lib/README.md) |
-| `tollan: bundle uses enrollment but this library has no enroll support` | Library older than 0.3.0 | Re-download your bundle for a newer library |
-| `tollan state -> terminal (version mismatch)` | Library version does not match the relay | Re-download your bundle and use its library |
-| mbedTLS `-9984` | Clock not synced (board thinks it is 1970) | `syncClock` is on by default — make sure NTP is reachable |
-| mbedTLS `-30592` | Wrong relay host/port | Use the bundle's values verbatim |
-| `curl /api` works but the browser page never loads | Request exceeded the 1600 B frame ceiling | See [The frame-size ceiling](#the-frame-size-ceiling) |
-| Tunnel works, then dies after ~90 days | No certificate renewal | See [Certificate renewal](#certificate-renewal) |
+| Symptom | Fix |
+|---|---|
+| `tollan state -> connected` never appears | Wrong relay host/port, or no route yet. Use the bundle's `TOLLAN_RELAY_HOST` / `TOLLAN_RELAY_PORT` verbatim. |
+| `tollan state -> terminal (version mismatch)` | The library doesn't match the relay. Use the library from your own bundle. |
+| mbedTLS `-30592` (fatal alert) | Wrong relay host or port. |
+| mbedTLS `-9984` (certificate verification failed) | The clock wasn't synced — the board booted near 1970. `syncClock` is on by default; make sure NTP is reachable. |
+| `tollan: no credentials found in tollan_config.h` | The bundle's `tollan_config.h` isn't in `src/`. |
+</details>
 
+<details>
+<summary><b>Sensor and hardware</b></summary>
+
+| Symptom | Fix |
+|---|---|
+| `{"error":"sensor_read_failed"}` | No sensor on the bus. Check the wiring; a bare TO-92 needs an external 4.7 kΩ pull-up, a module has it on board. |
+| Board hangs at boot | GPIO 12 is a strapping pin. Move the signal wire to GPIO 13 (`-DSENSOR_PIN=13`). |
+| Reading is 1–2 °C too high | The ESP32's regulator runs warm. Keep the sensor head away from it, near a vent. |
+</details>
+
+<details>
+<summary><b>Runtime</b></summary>
+
+| Symptom | Fix |
+|---|---|
+| `curl /api` works but the browser page never loads | The request exceeded the 1600 B frame ceiling. |
+| Works, then dies after ~90 days | Certificate renewal isn't enabled. Check for `tollan: cert renewal enabled` in the boot log. |
+| Dashboard says `OFFLINE` | The board is not connected — check the serial console and the route in the console. |
+</details>
+
+---
+
+## 📁 Repository layout
+
+```
+ThermoGhost/
+├─ src/
+│  ├─ main.cpp              firmware: TollanAgent handler mode + sensor + JSON API
+│  ├─ web_page.h            the pixel-art dashboard (PROGMEM, ~1 kB)
+│  ├─ secrets.h.example     → copy to secrets.h, add your WiFi
+│  └─ tollan_config.h.example  → shape of the bundle's config
+├─ docs/
+│  └─ hero.jpg              the build thumbnail
+├─ lib/
+│  └─ README.md             how to install the proprietary TollanAgent library
+├─ platformio.ini           build configs for ESP32 / S2 / C3
+└─ LICENSE                  MIT, for this repo's code only
+```
+
+`lib/TollanAgent/`, `src/secrets.h` and `src/tollan_config.h` are
+gitignored — they are either proprietary, secret, or both.
+
+---
+
+## 🙏 Credits
+
+- **[Tollan](https://tollan.ie)** — the tunnel, the relay and the
+  `TollanAgent` ESP32 library. Applied AI EdgeTech Limited.
+- **[runesblog.com](https://www.runesblog.com)** — the ESP32 DevKit Case
+  on [MakerWorld](https://makerworld.com/en/models/2180476-esp32-devkit-case-nice-and-sturdy).
+  Design and print files by the author.
+- **Espressif** — the ESP32.
+
+## 📄 License
+
+[MIT](LICENSE) — for this repository's own code.
+
+The `TollanAgent` library is **not** part of this repository. It is
+proprietary, licensed only for use with the Tollan service, and ships inside
+your own device bundle.

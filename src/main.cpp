@@ -40,11 +40,16 @@ using namespace tollan;
 #define SENSOR_TYPE SENSOR_DS18B20  // SENSOR_DHT22 | SENSOR_DHT11 | SENSOR_DS18B20
 #endif
 #ifndef SENSOR_PIN
-// GPIO 13 by default: it is a plain GPIO, not a strapping pin. GPIO 12
-// (MTDI) selects the flash voltage at boot, so a DS18B20's pull-up can stop
-// the board from booting on a 3.3 V flash module — use 12 only if you know
-// your board is safe for it.
-#define SENSOR_PIN 13  // GPIO the sensor data line is on
+// GPIO 12 is a strapping pin (MTDI): it selects the flash voltage at boot
+// (high = 1.8 V, low = 3.3 V). The pull-up on a DS18B20 module holds the
+// line high at reset, so on some 3.3 V flash boards the chip will hang at
+// boot. It works on most DevKit boards, but if yours doesn't, move the data
+// wire to GPIO 13 and build with -DSENSOR_PIN=13.
+#define SENSOR_PIN 12  // GPIO the sensor data line is on
+#if SENSOR_PIN == 12
+#warning \
+    "SENSOR_PIN 12 is a strapping pin (MTDI). If the board hangs at boot, use GPIO 13 (-DSENSOR_PIN=13)."
+#endif
 #endif
 
 // Secrets (gitignored): defines WIFI_SSID / WIFI_PASS.
