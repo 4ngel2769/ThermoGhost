@@ -94,33 +94,85 @@ static const char* DEVICE_KEY = R"PEM(
 namespace {
 
 // ---------------------------------------------------------------------------
-// Certificate renewal.
+// Bundle generations.
 //
-// Device certificates are valid for 90 days. Current bundles ship
-// TOLLAN_RENEW_URL, and library 0.2.0+ renews the certificate ~30 days
-// before expiry so the board keeps working unattended.
+// Tollan has shipped two ESP32 bundle formats and both are still in the wild:
 //
-// Older 0.1.x libraries have no `renewUrl` field at all. The two overloads
-// below pick themselves by overload resolution — the assignment only
-// compiles when the field exists — so this sketch builds against both
-// versions and tells you at runtime which one you got.
+//   * enrollment (current, library 0.3.0+): the bundle carries a one-time
+//     token; on first boot the board makes its own key and enrolls.
+//       -> TOLLAN_ENROLL_URL / TOLLAN_ENROLL_TOKEN / TOLLAN_ENROLL_CA
+//   * legacy (older bundles): the bundle shipped a client cert and private
+//     key directly.
+//       -> DEVICE_CERT / DEVICE_KEY
+//
+// A bundle also carries TOLLAN_RENEW_URL (certificate renewal) and the
+// current one carries TOLLAN_DEVICE_ID / TOLLAN_TARGETS_URL (health
+// check-in and live allowlist).
+//
+// The helpers below assign a config field only if the linked library
+// actually has it — the assignment is selected by overload resolution, so
+// the same sketch compiles against a library that predates the field, and
+// reports at runtime which case it hit. "Silently not renewing" means a
+// sensor that dies in 90 days; "silently not enrolling" means a board that
+// never connects. Both are worth shouting about on the serial console.
 // ---------------------------------------------------------------------------
-#ifdef TOLLAN_RENEW_URL
-// The URL is passed as an argument rather than referenced inside the
+
+// Generates a pair of overloads that assign an optional `const char*` field
+// on TollanConfig, but only when the linked library has that field.
+//
+// The value is passed as an argument rather than referenced inside the
 // decltype: a string literal in a template signature is not mangleable and
 // GCC rejects it outright.
-template <typename T>
-auto applyRenewUrl(T& cfg, const char* url, int)
-    -> decltype(cfg.renewUrl = url, bool()) {
-  cfg.renewUrl = url;
-  return true;
-}
+#define TOLLAN_OPTIONAL_FIELD(NAME)     \
+  template <typename T>                 \
+  auto set_##NAME(T& cfg, const char* v, int) \
+      -> decltype(cfg.NAME = v, bool()) {    \
+    cfg.NAME = v;                        \
+    return true;                         \
+  }                                       \
+  template <typename T>                 \
+  bool set_##NAME(T&, const char*, long) {  \
+    return false;  /* library predates this field */ \
+  }
 
-template <typename T>
-bool applyRenewUrl(T&, const char*, long) {
-  return false;  // library predates renewUrl
-}
+TOLLAN_OPTIONAL_FIELD(enrollUrl)
+TOLLAN_OPTIONAL_FIELD(enrollToken)
+TOLLAN_OPTIONAL_FIELD(enrollCaCert)
+TOLLAN_OPTIONAL_FIELD(renewUrl)
+TOLLAN_OPTIONAL_FIELD(deviceId)
+TOLLAN_OPTIONAL_FIELD(targetsUrl)
+
+#undef TOLLAN_OPTIONAL_FIELD
+
+// Wires the identity the bundle provides. Returns false when the board has
+// no usable credentials, which is the one failure that stops it connecting
+// at all.
+bool applyCredentials(TollanConfig& cfg) {
+#if defined(TOLLAN_ENROLL_URL) && defined(TOLLAN_ENROLL_TOKEN) && \
+    defined(TOLLAN_ENROLL_CA)
+  if (set_enrollUrl(cfg, TOLLAN_ENROLL_URL, 0) &&
+      set_enrollToken(cfg, TOLLAN_ENROLL_TOKEN, 0) &&
+      set_enrollCaCert(cfg, TOLLAN_ENROLL_CA, 0)) {
+    Serial.println(
+        "tollan: enrollment bundle — the board makes its own key on first boot");
+    return true;
+  }
+  Serial.println(
+      "tollan: bundle uses enrollment but this library has no enroll support "
+      "(need TollanAgent 0.3.0+)");
+  return false;
+#elif defined(DEVICE_CERT) && defined(DEVICE_KEY)
+  cfg.clientCert = DEVICE_CERT;
+  cfg.clientKey = DEVICE_KEY;
+  Serial.println("tollan: legacy bundle — using the bundled client cert + key");
+  return true;
+#else
+  Serial.println(
+      "tollan: no credentials found in tollan_config.h — copy the file from "
+      "your Tollan bundle into src/");
+  return false;
 #endif
+}
 
 // Tuning knobs.
 constexpr uint16_t kLocalPort = 80;          // LAN status page + API
@@ -481,18 +533,15 @@ void setup() {
   cfg.host = TOLLAN_RELAY_HOST;
   cfg.port = TOLLAN_RELAY_PORT;
   cfg.caCert = CA_CERT;
-  cfg.clientCert = DEVICE_CERT;
-  cfg.clientKey = DEVICE_KEY;
-  // Must cover one full relay DATA frame carrying browser headers (see
-  // kReqBufSize). The library default (1600) drops the tunnel on any single
-  // frame larger than that; 4096 needs the matching pump() buffer fix in the
-  // library.
-  cfg.maxFrameBytes = 4096;
+
+  // Identity. Enrollment bundles carry a one-time token and the board
+  // generates its own key; legacy bundles carry a client cert + key.
+  const bool haveIdentity = applyCredentials(cfg);
 
   // Certificate renewal. "Silently not renewing" means a sensor that dies
   // in 90 days, so always say out loud which of the three cases we hit.
 #ifdef TOLLAN_RENEW_URL
-  if (applyRenewUrl(cfg, TOLLAN_RENEW_URL, 0)) {
+  if (set_renewUrl(cfg, TOLLAN_RENEW_URL, 0)) {
     Serial.println("tollan: cert renewal enabled");
   } else {
     Serial.println(
@@ -504,6 +553,28 @@ void setup() {
       "tollan: no TOLLAN_RENEW_URL in bundle — certs will NOT auto-renew "
       "(90-day expiry)");
 #endif
+
+  // Health check-in: reports free memory, Wi-Fi signal and uptime to the
+  // console, and pulls the live route allowlist. Current bundles only.
+#if defined(TOLLAN_DEVICE_ID) && defined(TOLLAN_TARGETS_URL)
+  if (set_deviceId(cfg, TOLLAN_DEVICE_ID, 0) &&
+      set_targetsUrl(cfg, TOLLAN_TARGETS_URL, 0)) {
+    Serial.println("tollan: health check-in enabled");
+  }
+#endif
+
+  // Per-frame cap. NOTE: the library's own receive buffer is the real
+  // ceiling — the precompiled 0.3.0 build stages frames in a fixed 1600 B
+  // buffer, so 4096 cannot be honoured there and a request over 1600 B is
+  // dropped with "oversize request". A browser GET is ~700-1200 B plus the
+  // relay's forwarded headers and fits; set this lower to shrink RAM.
+  cfg.maxFrameBytes = 4096;
+
+  if (!haveIdentity) {
+    Serial.println(
+        "tollan: no usable identity — the tunnel will never come up. See the "
+        "setup steps in the README.");
+  }
 
   agent.onOpen([](uint32_t ch, const char*, size_t) {
     Serial.printf("open  channel %u\n", ch);

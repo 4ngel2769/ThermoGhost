@@ -1,7 +1,9 @@
 # ── Secrets — never commit ─────────────────────────────
-# Per-board provisioning (copied from Tollan console bundle + WiFi creds)
-src/tollan_config.h
-src/secrets.h
+# Per-board provisioning (copied from the Tollan console bundle + WiFi creds).
+# Matched at any depth: the bundle's own tollan_config.h holds a one-time
+# enrollment token that can enrol a board as your device.
+tollan_config.h
+secrets.h
 sensors.json
 
 # Certs / keys anywhere in the tree
@@ -13,13 +15,30 @@ sensors.json
 *.p12
 *.pfx
 
+# ── Downloaded Tollan bundles ──────────────────────────
+# The bundle archive and its extracted form both carry the enrollment token
+# and the device identity. Keep them out of git.
+tollan-esp32-sensor/
+tollan-esp32-sensor-*/
+*.tar.gz
+*.tgz
+
 # ── Vendored third-party (TollanAgent) ──────────────────
 # The TollanAgent library is proprietary: it ships inside your ESP32 device
-# bundle and is "licensed for use with the Tollan service only"
+# bundle and is "licensed only for use with the Tollan service"
 # (docs.tollan.ie/esp32-getting-started.html). Download it from your bundle
 # and unzip it here — do NOT commit it. lib/README.md is tracked on purpose.
-# lib/tollan-agent-library/
-# lib/TollanAgent/
+lib/TollanAgent/
+lib/tollan-agent/
+lib/tollan-agent-library/
+
+# The 0.1.0 source fork of TollanAgent, kept for reference only (it has a
+# 4 KB frame buffer the shipped build does not). Lives outside lib/ so the
+# Library Dependency Finder does not pick it up alongside the real library.
+legacy/
+
+# ── Local agent memory / daemon state ──────────────────
+# Machine-local: contains absolute paths, PIDs and a local SQLite db.
 .graymatter/
 
 # ── PlatformIO ─────────────────────────────────────────
@@ -51,4 +70,3 @@ venv/
 Thumbs.db
 *.swp
 *~
-/.graymatter

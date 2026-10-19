@@ -27,25 +27,29 @@ inbound ports, no port-forwarding, works behind NAT/CGNAT.
 
 1. **Tollan account/org** — sign up in the Tollan console. The free tier
    (1 device, 2 routes, 5 GB) is enough for this project.
-2. **Register the device** — name e.g. `living-sensor`. **Choose bundle mode,
-   not enrollment** — the ESP32 library does not support enrollment
-   (on-device keygen is roadmap). Any enrollment token / `tollan-agent`
-   command from the console is for the **Go agent** on a Linux box and cannot
-   run on an ESP32.
+2. **Register the device** — name e.g. `living-sensor`, and pick the **ESP32**
+   architecture. Architecture is cosmetic for the ESP32 (you take certs, not
+   a binary).
 3. **Build + download the bundle** (link is single-use, short expiry).
-   - Copy `ca.crt`, `device.crt`, `device.key` into `src/tollan_config.h`
-     (see `src/tollan_config.h.example`).
-   - The bundle ships the relay host/port — paste them as given.
-     The WebSocket path is the library default `TOLLAN_TUNNEL_PATH`
-     (`/__tunnel`) — no override needed.
+   - **Current bundles use enrollment**, not a shipped private key: the board
+     generates its own key on first boot and enrols with a one-time token.
+     The bundle's `tollan_config.h` carries
+     `TOLLAN_ENROLL_URL` / `TOLLAN_ENROLL_TOKEN` / `TOLLAN_ENROLL_CA`.
+   - **Copy the bundle's `tollan_config.h` whole** into `src/`. It also
+     carries `TOLLAN_RENEW_URL`, without which your board stops working in
+     90 days (see [Certificate renewal](#certificate-renewal)), and
+     `TOLLAN_DEVICE_ID` / `TOLLAN_TARGETS_URL` for the health check-in.
+   - That file holds a **one-time enrollment token** — a secret until the
+     board has enrolled. It is gitignored; keep it off shared drives.
+   - Older bundles shipped `DEVICE_CERT` / `DEVICE_KEY` instead. The sketch
+     detects which format it has and wires the right one, so it builds
+     against both.
    - Copy `src/secrets.h.example` → `src/secrets.h` with your WiFi creds.
-   - **Copy the bundle's `tollan_config.h` whole.** It also carries
-     `TOLLAN_RENEW_URL`, without which your board stops working in 90 days
-     (see [Certificate renewal](#certificate-renewal)).
 4. **Install the TollanAgent library** — it is inside the bundle you just
-   downloaded. Unzip it into `lib/` so this repo has `lib/TollanAgent/`.
-   See [`lib/README.md`](lib/README.md) — it also explains why the library
-   version matters and what breaks if you mix them up.
+   downloaded. Copy `TollanAgent/` into `lib/` so this repo has
+   `lib/TollanAgent/`. See [`lib/README.md`](lib/README.md) — it ships
+   **precompiled, one archive per chip**, so `platformio.ini` has to point the
+   linker at the right one (this repo's already does).
 5. **Add a route** on the device. Pick the exposure mode deliberately, it
    decides what the relay can see — see [Route modes](#route-modes-and-what-the-relay-can-see).
    - Internal target: any placeholder (handler mode — the board answers
@@ -56,9 +60,12 @@ inbound ports, no port-forwarding, works behind NAT/CGNAT.
    ```bash
    pio run -e esp32s2mini -t upload   # ESP32-S2 Mini (LOLIN S2 Mini)
    pio run -e esp32dev -t upload      # classic ESP32 (WROOM-32 / DevKitC)
+   pio run -e esp32c3 -t upload       # ESP32-C3 (SuperMini / DevKitM-1)
    pio device monitor -b 115200
    ```
-   Watch for `tollan state -> connected`.
+   Watch for `tollan state -> connected`. At boot the sketch also prints
+   which credential format it found and whether renewal and the health
+   check-in are live.
 8. **Test**: `curl https://<your-route>/api` →
    `{"room":"living","tempC":22.5,"humidity":45.2,"tsMs":...}`
 
@@ -194,6 +201,21 @@ off until after expiry cannot renew and needs a new bundle.
 - `TollanState::Terminal` = protocol-version mismatch; the agent stops and
   won't reconnect. Use the library from your own bundle.
 
+## The frame-size ceiling
+
+The TollanAgent library stages an inbound WebSocket frame in a fixed
+**1600-byte** receive buffer, inside the precompiled archive. A request that
+does not fit is dropped and the tunnel resets with `oversize request —
+dropping`.
+
+- `curl /api` sends a small request — fine.
+- A browser `GET /` sends ~700–1200 B of headers plus the relay's forwarded
+  headers — usually fine, but the margin is thin.
+
+`cfg.maxFrameBytes` can only *lower* this ceiling, never raise it. If the
+dashboard 404s for you in a browser while `curl /api` works, this is why —
+and the fix is upstream, in the library.
+
 ## Re-flashing for another room
 
 Change `ROOM_ID`, register a second device in the console (each board has its
@@ -201,7 +223,10 @@ own mTLS identity), reuse this sketch, flash. Route per sensor.
 
 ## Hardening notes
 
-- `device.key` never leaves your possession; keep it out of git (gitignored).
+- With the current enrollment bundles the device key is generated **on the
+  chip** and never leaves it; the bundle only carries a one-time token. With
+  older bundles the private key was in the download — keep it out of git
+  either way (it is gitignored).
 - The relay↔board hop is mTLS end-to-end. In terminate mode the visitor's TLS
   ends at the relay, so the relay sees that leg in plaintext — see
   [Route modes](#route-modes-and-what-the-relay-can-see).
@@ -215,8 +240,12 @@ own mTLS identity), reuse this sketch, flash. Route per sensor.
 | `{"error":"sensor_read_failed"}` | No sensor on the bus | Check wiring; 3-pin modules usually have the 4.7 kΩ pull-up, bare TO-92 sensors do not |
 | Board will not boot | Sensor on GPIO 12 (strapping pin) holds the line high at reset | Move the data wire to GPIO 13 |
 | `tollan state -> connected` never appears | Wrong relay host/port, or no route | Use the bundle's `TOLLAN_RELAY_HOST` / `TOLLAN_RELAY_PORT`; check the route is enabled |
+| `undefined reference to tollan::TollanAgent::begin` | Precompiled archive not linked | Check `lib/TollanAgent/` exists and the `-L` path matches your chip — see [`lib/README.md`](lib/README.md) |
+| `'DEVICE_CERT' was not declared` | Enrollment bundle with an older library | Update the library from a fresh bundle (0.3.0+) — see [`lib/README.md`](lib/README.md) |
+| `tollan: bundle uses enrollment but this library has no enroll support` | Library older than 0.3.0 | Re-download your bundle for a newer library |
 | `tollan state -> terminal (version mismatch)` | Library version does not match the relay | Re-download your bundle and use its library |
 | mbedTLS `-9984` | Clock not synced (board thinks it is 1970) | `syncClock` is on by default — make sure NTP is reachable |
 | mbedTLS `-30592` | Wrong relay host/port | Use the bundle's values verbatim |
-| `curl /api` works but the browser page never loads | Library's `pump()` buffer smaller than 4096 | See [`lib/README.md`](lib/README.md) |
+| `curl /api` works but the browser page never loads | Request exceeded the 1600 B frame ceiling | See [The frame-size ceiling](#the-frame-size-ceiling) |
 | Tunnel works, then dies after ~90 days | No certificate renewal | See [Certificate renewal](#certificate-renewal) |
+
