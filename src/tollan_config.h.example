@@ -1,0 +1,43 @@
+// tollan_config.h — copy from your ESP32 device bundle into src/ (gitignored).
+//
+// The bundle in the Tollan console ships this file with real values. Copy it
+// WHOLE — do not hand-edit the host, port or renewal URL, they must match
+// your relay exactly.
+//
+// This file exists only as a shape reference for what to expect. The values
+// below are placeholders and will NOT connect.
+#pragma once
+
+// Relay hostname = RELAY_PUBLIC_SNI from the bundle. Must match the relay's
+// server certificate exactly — it is both the dial target and the TLS SNI.
+#define TOLLAN_RELAY_HOST "RELAY_PUBLIC_SNI_FROM_YOUR_BUNDLE"
+
+// Relay control-channel port. The bundle ships 443, which also gets through
+// firewalls that block unusual outbound ports.
+#define TOLLAN_RELAY_PORT 443
+
+// Certificate renewal endpoint. Present in current bundles; the board renews
+// its own certificate ~30 days before the 90-day expiry. Requires
+// TollanAgent 0.2.0+ — see lib/README.md.
+// #define TOLLAN_RENEW_URL "https://RENAME_FROM_YOUR_BUNDLE"
+
+// The WebSocket path is the library default TOLLAN_TUNNEL_PATH ("/__tunnel"),
+// so wss://<host>:443/__tunnel — no override needed.
+
+static const char* CA_CERT = R"PEM(
+-----BEGIN CERTIFICATE-----
+<ca.crt from bundle>
+-----END CERTIFICATE-----
+)PEM";
+
+static const char* DEVICE_CERT = R"PEM(
+-----BEGIN CERTIFICATE-----
+<device.crt from bundle>
+-----END CERTIFICATE-----
+)PEM";
+
+static const char* DEVICE_KEY = R"PEM(
+-----BEGIN EC PRIVATE KEY-----
+<device.key from bundle — keep secret, never commit>
+-----END EC PRIVATE KEY-----
+)PEM";

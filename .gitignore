@@ -1,0 +1,54 @@
+# ── Secrets — never commit ─────────────────────────────
+# Per-board provisioning (copied from Tollan console bundle + WiFi creds)
+src/tollan_config.h
+src/secrets.h
+sensors.json
+
+# Certs / keys anywhere in the tree
+*.key
+*.pem
+*.crt
+*.cer
+*.der
+*.p12
+*.pfx
+
+# ── Vendored third-party (TollanAgent) ──────────────────
+# The TollanAgent library is proprietary: it ships inside your ESP32 device
+# bundle and is "licensed for use with the Tollan service only"
+# (docs.tollan.ie/esp32-getting-started.html). Download it from your bundle
+# and unzip it here — do NOT commit it. lib/README.md is tracked on purpose.
+# lib/tollan-agent-library/
+# lib/TollanAgent/
+.graymatter/
+
+# ── PlatformIO ─────────────────────────────────────────
+.pio/
+.pioenvs/
+.piolibdeps/
+build/
+CMakeFiles/
+cmake_install.cmake
+
+# ── Python (poller-side helpers, if any) ───────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# ── VS Code ────────────────────────────────────────────
+# Keep extensions.json (shared recommendations), ignore
+# auto-generated / machine-local files with absolute paths.
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/.browse.c_cpp.db*
+.vscode/ipch/
+
+# ── OS / editor junk ───────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*~
+/.graymatter
